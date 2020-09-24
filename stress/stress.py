@@ -11,15 +11,47 @@ import sys
 import time
 
 
-def _spin():
+def _spin(ram_per_core_mb):
     """
-    Spin in an infinite loop.
+    Spin in an infinite loop, consuming up to ram_per_core_mb.
 
+    :param ram_per_core_mb: How many MB of RAM to consume in loop.
     :return: None
     """
+    me = psutil.Process()
+    print(
+        (
+            f"Start time: {time.asctime()}. "
+            f"Current RAM usage: {me.memory_info().rss / 1024 / 1024:,.1f} MB. "
+            f"RAM usage target : {ram_per_core_mb:,} MB"
+        )
+    )
 
+    steps = 10
+    ram_per_step_mb = int(ram_per_core_mb / steps)
+
+    dummy = list([1.0])
     while True:
-        pass
+        # Allocate RAM until resident set size (rss) reaches 90% of target
+        if me.memory_info().rss < ram_per_core_mb * 1024 * 1024 * 0.90:
+            try:
+                num = 1.0
+                dummy += [num] * int(ram_per_step_mb / sys.getsizeof(num) * 1024 * 1024)
+
+            except MemoryError:
+                # We didn't have enough RAM for our attempt, so we will recursively try
+                # smaller amounts 10% smaller at a time
+                ram_per_step_mb = int(ram_per_step_mb * 0.8)
+
+        print((
+            f"Memory allocated: {me.memory_info().rss / 1024 / 1024:,.1f} MB "
+            f"of {ram_per_core_mb:,} MB in {len(dummy):,} elements "
+            f"as at {time.asctime()}."
+        ))
+
+        # Do something with dummy to try and keep it in active RAM
+        for i, n in enumerate(dummy):
+            dummy[i] += 1.0
 
 
 def _parse_args():
@@ -38,38 +70,19 @@ def _parse_args():
     return parser.parse_args()
 
 
-def stress_processes(num_processes):
+def stress_processes(num_processes, ram_per_core_mb):
     """
-    Starts a given number infinite processing loops.
+    Starts a given number infinite processing loops. Pauses briefly between
+    starting each process.
 
     :param num_processes: the number of processes to spin
+    :param ram_per_core_mb: amount of RAM each process should try and use
     :return: None
     """
 
     for _ in range(num_processes):
-        multiprocessing.Process(target=_spin).start()
-
-
-def stress_ram(ram_to_allocate_mb):
-    """
-    Attempts to allocate the given amount of RAM to the running Python process.
-
-    :param ram_to_allocate_mb: the amount of RAM in megabytes to allocate
-    :return: None
-    """
-
-    try:
-        # Each element takes approx 8 bytes
-        # Multiply n by 1024**2 to convert from MB to Bytes
-        _ = [0] * int(((ram_to_allocate_mb / 8) * (1024 ** 2)))
-
-        while True:
-            # This is just to keep the process running until halted
-            time.sleep(1)
-    except MemoryError:
-        # We didn't have enough RAM for our attempt, so we will recursively try
-        # smaller amounts 10% smaller at a time
-        stress_ram(int(ram_to_allocate_mb * 0.9))
+        multiprocessing.Process(target=_spin, args=(ram_per_core_mb,)).start()
+        time.sleep(3)
 
 
 def _cmd_line():
@@ -86,18 +99,24 @@ def _cmd_line():
     # This eats the interrupted exception when the process is terminated
     signal.signal(signal.SIGINT, lambda x, y: sys.exit(1))
 
-    if not cores_to_stress and not memory_to_allocate:
+    if not cores_to_stress:
         cores_to_stress = multiprocessing.cpu_count()
-        memory_to_allocate = psutil.virtual_memory().total
+    if not memory_to_allocate:
+        memory_to_allocate = psutil.virtual_memory().total / 1024 / 1024
+
+    memory_per_core = int(memory_to_allocate / cores_to_stress)
+
+    print(f"Memory: {psutil.virtual_memory()}")
+    print(f"Starting {cores_to_stress} processes which will consume up to {memory_per_core:,} MB each")
 
     if cores_to_stress:
         # The CPU stress has to happen in another process since it is infinitely
-        # CPU hungry
+        # CPU hungry. Each process will consume RAM.
         multiprocessing.Process(target=stress_processes,
-                                args=(cores_to_stress,)).start()
-    if memory_to_allocate:
-        # We can allocate RAM in this process
-        stress_ram(memory_to_allocate)
+                                args=(cores_to_stress, memory_per_core)).start()
+    else:
+        # Changed from 1.0 - memory is allocated in stress_process
+        raise ValueError("Must have some cores to stress")
 
 
 if __name__ == '__main__':
